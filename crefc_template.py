@@ -34,7 +34,7 @@ DATE_FMT = "yyyy-mm-dd"
 
 def _txids_in_frame(df):
     col_a = df.iloc[:, 0]
-    return {str(v).strip() for v in col_a if v is not None and str(v).strip()}
+    return {str(v).strip().casefold() for v in col_a if v is not None and str(v).strip()}
 
 
 def build_template(template_bytes: bytes, results_by_type: dict, progress=None) -> tuple[bytes, list]:
@@ -63,13 +63,15 @@ def build_template(template_bytes: bytes, results_by_type: dict, progress=None) 
         for df in frames:
             uploaded_txids |= _txids_in_frame(df)
 
-        # Keep existing rows for deals that were NOT re-uploaded.
+        # Keep existing rows for deals that were NOT re-uploaded (case-insensitive
+        # match, because the template mixes 'CoreVest Amer 2019-3' and the
+        # upper-case form across tabs).
         kept = []
         for row in ws.iter_rows(min_row=2, values_only=True):
             a = row[0]
             if a is None or str(a).strip() == "":
                 continue
-            if str(a).strip() in uploaded_txids:
+            if str(a).strip().casefold() in uploaded_txids:
                 continue
             kept.append(list(row))
 
