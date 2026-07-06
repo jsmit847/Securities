@@ -60,13 +60,70 @@ def _num(series):
 
 
 def _suggest_deal(files) -> str:
+    """Derive the output prefix from the actual transaction ID in the data.
+
+    Reads the first field of the first row of each recognized CREFC text file
+    (that IS the transaction ID). Falls back to the filename token only if the
+    content can't be read. This prevents mislabeling (e.g. a 2017-2 file getting
+    a 2018-1 name from its filename).
+    """
     import re as _re
+    txids = set()
     for f in files or []:
+        low = f.name.lower()
+        if detect_type(f.name) and low.endswith((".txt", ".csv")):
+            try:
+                first = f.getvalue().decode("utf-8-sig", "replace").split("\n", 1)[0]
+                tid = first.split(",", 1)[0].strip()
+                if tid:
+                    txids.add(tid)
+            except Exception:
+                pass
+    if len(txids) == 1:
+        return _re.sub(r"[^A-Za-z0-9._-]", "", next(iter(txids))) or "DEAL"
+    if len(txids) > 1:
+        return "MultiDeal"
+    for f in files or []:  # filename fallback
         base = f.name.rsplit("/", 1)[-1]
         m = _re.search(r"([A-Za-z]{2,}[_-]?\d{3,})_(?:CBND|CCOL|LPER|PROP|FINF|DDST|RSRV)", base, _re.I)
         if m:
             return m.group(1).replace("_", "")
     return "DEAL"
+
+
+class _MemFile:
+    """A lightweight stand-in for an uploaded file (name + bytes)."""
+    def __init__(self, name: str, data: bytes):
+        self.name = name
+        self._data = data
+
+    def getvalue(self) -> bytes:
+        return self._data
+
+
+def expand_uploads(files):
+    """Flatten uploads: any .zip is expanded into its inner files.
+
+    Lets the user drop one zip of every deal's files instead of hundreds of
+    individual uploads.
+    """
+    out = []
+    for f in files or []:
+        if f.name.lower().endswith(".zip"):
+            try:
+                with zipfile.ZipFile(io.BytesIO(f.getvalue())) as zf:
+                    for info in zf.infolist():
+                        if info.is_dir():
+                            continue
+                        inner = info.filename.rsplit("/", 1)[-1]
+                        if not inner or inner.startswith(".") or "__MACOSX" in info.filename:
+                            continue
+                        out.append(_MemFile(inner, zf.read(info)))
+            except zipfile.BadZipFile:
+                out.append(f)
+        else:
+            out.append(f)
+    return out
 
 
 def classify(files):
@@ -221,12 +278,13 @@ st.markdown(
 # ============================================================================= 
 if mode == "Convert raw files":
     uploaded = st.file_uploader(
-        "Upload raw Trustee files",
-        type=["txt", "csv", "xls", "xlsx", "pdf"], accept_multiple_files=True,
-        help="Type is detected from the name (…_LPER.txt etc.). Override anything below.",
+        "Upload raw Trustee files (or a .zip of them)",
+        type=["txt", "csv", "xls", "xlsx", "pdf", "zip"], accept_multiple_files=True,
+        help="Type is detected from the name (…_LPER.txt etc.). Drop a .zip to load many deals at once.",
     )
+    uploaded = expand_uploads(uploaded)
     deal_label = st.sidebar.text_input("Deal label (output prefix)", value=_suggest_deal(uploaded),
-                                       help="Auto-filled from the file names, e.g. CVAF20182.")
+                                       help="Auto-filled from the transaction ID in the data.")
 
     if not uploaded:
         st.markdown("<div class='note'>Waiting for files. Drop the raw <code>.txt</code> exports "
@@ -355,8 +413,9 @@ else:
                 "downloads and are left untouched.</div>", unsafe_allow_html=True)
 
     tpl = st.file_uploader("1 · Reporting template (.xlsx)", type=["xlsx"], accept_multiple_files=False)
-    uploaded = st.file_uploader("2 · Raw Trustee files (one or many deals)",
-                                type=["txt", "csv", "xls", "xlsx", "pdf"], accept_multiple_files=True)
+    uploaded = st.file_uploader("2 · Raw Trustee files — one or many deals (or a .zip of them)",
+                                type=["txt", "csv", "xls", "xlsx", "pdf", "zip"], accept_multiple_files=True)
+    uploaded = expand_uploads(uploaded)
 
     if not tpl or not uploaded:
         st.stop()
