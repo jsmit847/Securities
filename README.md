@@ -47,6 +47,13 @@ Drop the raw `.txt` exports. The app:
 | `DDST`.pdf| Statement           | passthrough|
 | `RSRV`.xls| Reserve / LOC       | passthrough|
 
+**Statement PDFs are parsed, not passed through.** The `DDST` remittance
+statement is read with pdfplumber and its key tables — Certificate Distribution,
+Certificate Interest Reconciliation, Delinquency, and Specially Serviced — are
+extracted into a per-deal `*-Statement_<period>.xlsx` workbook (formatted numbers
+converted to real numbers). Only files that genuinely can't be parsed (e.g. the
+legacy `RSRV.xls`) are still passed through.
+
 ## Mode 2 — Build reporting template
 
 1. Upload your reporting template (`.xlsx`).
@@ -81,6 +88,7 @@ delinquency, and REO sections of the dashboard.
 | `crefc_io.py`       | Excel writers (single sheet + combined workbook)           |
 | `crefc_template.py` | Merges converted data into the reporting template          |
 | `crefc_headers.py`  | CREFC 8.4 header definitions per file type                 |
+| `crefc_pdf.py`      | Parses the DDST remittance statement PDF into tables       |
 | `requirements.txt`  | Dependencies                                               |
 
 ---

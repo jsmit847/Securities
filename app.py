@@ -26,6 +26,7 @@ import streamlit as st
 from crefc_convert import convert, detect_type, infer_period, FILE_TYPES, CREFC_HEADERS
 from crefc_io import single_workbook_bytes, combined_workbook_bytes
 from crefc_template import build_template, CORE_TABS
+from crefc_pdf import parse_statement
 
 
 # ----------------------------------------------------------------------------- 
@@ -141,16 +142,31 @@ def classify(files):
 
 
 def run_conversions(plan, normalize_dates):
-    """Convert the recognised raw files. Returns results, by_type, passthrough, meta, period."""
-    results = {}       # sheet_name -> DataFrame (last one wins; used in convert mode)
-    by_type = {}       # file_type -> [DataFrame, ...] across deals (template mode)
-    passthrough = []   # (name, bytes)
-    meta = []          # blotter rows: (txid, name, label, dim, badge, detail)
+    """Convert raw files, parse statement PDFs. Returns results, by_type, statements, passthrough, meta, period."""
+    by_type = {}       # file_type -> [DataFrame, ...] across deals
+    statements = []    # (deal_label, {sheet: DataFrame}) parsed from DDST PDFs
+    passthrough = []   # (name, bytes) — things we genuinely can't parse
+    meta = []          # blotter rows
     period = None
 
     for uf, choice in plan:
         data = uf.getvalue()
-        if choice in ("PDF", "XLS"):
+        if choice == "PDF":
+            try:
+                secs = parse_statement(data)
+            except Exception:                      # noqa: BLE001
+                secs = {}
+            if secs:
+                label = _suggest_deal([uf])
+                statements.append((label, secs))
+                rows = sum(len(d) for d in secs.values())
+                meta.append(("—", uf.name, "statement", f"{rows} rows",
+                             "PARSED", f"{len(secs)} tables extracted"))
+            else:
+                passthrough.append((uf.name, data))
+                meta.append(("—", uf.name, "statement", "—", "PASS", "couldn't parse — passed through"))
+            continue
+        if choice == "XLS":
             passthrough.append((uf.name, data))
             meta.append(("—", uf.name, "passthrough", "—", "PASS", "not reparsed"))
             continue
@@ -163,8 +179,6 @@ def run_conversions(plan, normalize_dates):
             meta.append(("—", uf.name, choice, "—", "ERR", str(exc)))
             continue
         period = period or infer_period(res.df)
-        sheet = FILE_TYPES[choice]["sheet"]
-        results[sheet] = res.df
         by_type.setdefault(choice, []).append(res.df)
         txid = str(res.df.iloc[0, 0]).strip() if len(res.df) else "—"
         badge = "OK" if res.ok else "CHK"
@@ -172,13 +186,17 @@ def run_conversions(plan, normalize_dates):
             "best-effort headers" if res.best_effort else "clean")
         meta.append((txid, uf.name, FILE_TYPES[choice]["label"], f"{res.n_rows:,} × {res.n_cols}",
                      badge, detail))
-    return results, by_type, passthrough, meta, (period or _dt.date.today().strftime("%Y_%m"))
+
+    # Stack every uploaded deal per file type so the combined output holds them all.
+    results = {FILE_TYPES[ft]["sheet"]: pd.concat(frames, ignore_index=True)
+               for ft, frames in by_type.items()}
+    return results, by_type, statements, passthrough, meta, (period or _dt.date.today().strftime("%Y_%m"))
 
 
 def blotter_html(meta):
     rows = []
     for tkr, name, label, dim, badge, detail in meta:
-        cls = {"OK": "ok", "PASS": "ok", "CHK": "warn", "SKIP": "warn", "ERR": "err"}.get(badge, "warn")
+        cls = {"OK": "ok", "PASS": "ok", "PARSED": "ok", "CHK": "warn", "SKIP": "warn", "ERR": "err"}.get(badge, "warn")
         rows.append(
             f"<div class='blot-row'><span class='blot-tkr'>{tkr}</span>"
             f"<span class='blot-name'>{name}<br>"
@@ -308,7 +326,7 @@ if mode == "Convert raw files":
                 fixed.append((uf, sel))
         plan = fixed
 
-    results, by_type, passthrough, meta, period = run_conversions(plan, normalize_dates)
+    results, by_type, statements, passthrough, meta, period = run_conversions(plan, normalize_dates)
 
     c1, c2, c3, c4 = st.columns(4)
     c1.markdown(f"<div class='stat'><b>{len(results)}</b><span>Tables converted</span></div>", unsafe_allow_html=True)
@@ -332,6 +350,8 @@ if mode == "Convert raw files":
         for sheet, df in results.items():
             out = FILE_TYPES[[k for k, v in FILE_TYPES.items() if v["sheet"] == sheet][0]]["out"]
             zf.writestr(f"{deal_label}-{out}_{period}.xlsx", single_workbook_bytes(df, sheet))
+        for label, secs in statements:
+            zf.writestr(f"{label}-Statement_{period}.xlsx", combined_workbook_bytes(secs))
         for name, data in passthrough:
             zf.writestr(f"_passthrough/{name}", data)
     d2.download_button("All files (.zip — individual workbooks)", data=zbuf.getvalue(),
@@ -348,6 +368,23 @@ if mode == "Convert raw files":
                                file_name=f"{deal_label}-{out}_{period}.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                key=f"dl_{sheet}")
+
+    if statements:
+        st.markdown("### Statements (parsed from the .pdf)")
+        st.markdown("<div class='note'>The remittance statement PDFs are now read directly — no more "
+                    "passing them through. Each deal's key tables (bond distribution, delinquency, "
+                    "specially serviced, interest reconciliation) are extracted below.</div>",
+                    unsafe_allow_html=True)
+        for label, secs in statements:
+            with st.expander(f"{label}  ·  {len(secs)} tables", expanded=False):
+                for sheet, df in secs.items():
+                    st.caption(sheet)
+                    st.dataframe(_dedup_columns(df), use_container_width=True, height=200)
+                st.download_button(f"Download {label} statement workbook",
+                                   data=combined_workbook_bytes(secs),
+                                   file_name=f"{label}-Statement_{period}.xlsx",
+                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                   key=f"stmt_{label}")
 
     periodic = results.get("Periodic")
     if periodic is not None:
@@ -421,7 +458,7 @@ else:
         st.stop()
 
     plan = classify(uploaded)
-    results, by_type, passthrough, meta, period = run_conversions(plan, normalize_dates)
+    results, by_type, statements, passthrough, meta, period = run_conversions(plan, normalize_dates)
 
     # deals detected (transaction IDs) from the four core types
     deals = sorted({str(df.iloc[0, 0]).strip() for ft in CORE_TABS for df in by_type.get(ft, []) if len(df)})
