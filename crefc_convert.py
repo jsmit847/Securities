@@ -59,27 +59,19 @@ def detect_type(filename: str) -> str | None:
     return None
 
 
-def _coerce_scalar(s: str):
-    """Coerce a raw CSV cell string to int / float / cleaned string / None."""
-    if s is None:
-        return None
-    if s == "" or s.strip() == "":
-        return None                      # blank or whitespace-only -> empty cell
+def _is_number(s: str) -> bool:
+    return bool(_INT_RE.match(s) or _FLOAT_RE.match(s))
+
+
+def _to_number(s: str):
+    """Convert a numeric string to int/float the way Excel 'General' would."""
     v = s.strip()
     if _INT_RE.match(v):
-        # keep as int unless it has a leading zero (identifier like a zip/id)
-        if len(v.lstrip("-")) > 1 and v.lstrip("-").startswith("0"):
-            return v
         try:
             return int(v)
         except ValueError:
-            return v
-    if _FLOAT_RE.match(v):
-        try:
             return float(v)
-        except ValueError:
-            return v
-    return v
+    return float(v)
 
 
 def _as_date(value):
@@ -146,16 +138,28 @@ def convert(raw_bytes: bytes, file_type: str, normalize_dates: bool = True) -> C
 
     df = pd.DataFrame(fixed, columns=headers)
 
-    # Type coercion + optional date normalization, done positionally so that
-    # duplicate header labels (e.g. "Not Used") don't collapse columns.
+    # Column-level typing, mirroring Excel Text-to-Columns "General" behavior:
+    #   * a column whose every non-blank cell is numeric -> coerced to numbers
+    #     (leading zeros dropped, e.g. "005" -> 5, "030299963" -> 30299963);
+    #   * a column containing any non-numeric value (a letter, dash, code) -> text;
+    #   * blanks / whitespace-only cells -> empty (None).
+    # Done positionally so duplicate header labels (e.g. "Not Used") don't collide.
     date_idx = set(date_column_indices(file_type)) if normalize_dates else set()
     cols = []
     for j in range(len(headers)):
-        raw_col = df.iloc[:, j]
-        coerced = raw_col.map(_coerce_scalar)
-        if j in date_idx:
-            coerced = coerced.map(_as_date)
+        raw_col = df.iloc[:, j].astype(str)
+        stripped = raw_col.str.strip()
+        nonblank = stripped[stripped != ""]
+        numeric_col = len(nonblank) > 0 and bool(nonblank.map(_is_number).all())
+
+        if j in date_idx and numeric_col:
+            coerced = stripped.map(lambda s: _as_date(s) if s else None)
+        elif numeric_col:
+            coerced = stripped.map(lambda s: _to_number(s) if s else None)
+        else:
+            coerced = stripped.map(lambda s: s if s else None)
         cols.append(coerced)
+
     df = pd.concat(cols, axis=1)
     df.columns = headers
 
