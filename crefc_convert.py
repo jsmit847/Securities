@@ -209,6 +209,9 @@ def _normalize_date_series(s: pd.Series) -> pd.Series:
 
 
 def _coerce_numeric_series(s: pd.Series) -> Optional[pd.Series]:
+    """If every non-blank value parses as a number, return an OBJECT series of
+    native Python int/float/None (no numpy scalars, no pandas NA) so openpyxl
+    and the template writer can consume it directly. Otherwise return None."""
     stripped = s.map(_clean_str)
     is_blank = stripped.str.lower().isin(_BLANKS)
     nonblank = stripped[~is_blank]
@@ -217,10 +220,16 @@ def _coerce_numeric_series(s: pd.Series) -> Optional[pd.Series]:
     parsed = pd.to_numeric(nonblank.str.replace(",", "", regex=False), errors="coerce")
     if not parsed.notna().all():
         return None
-    out = pd.to_numeric(stripped.str.replace(",", "", regex=False), errors="coerce")
-    if (out.dropna() % 1 == 0).all():
-        out = out.astype("Int64")
-    return out
+    all_int = bool((parsed % 1 == 0).all())
+
+    def conv(v):
+        t = _clean_str(v)
+        if t.lower() in _BLANKS:
+            return None
+        num = float(t.replace(",", ""))
+        return int(num) if all_int else num
+
+    return s.map(conv).astype(object)
 
 
 # --------------------------------------------------------------------------- #
