@@ -154,6 +154,32 @@ def _is_date_header(h: str) -> bool:
     return ("date" in low) or (low == "yyyymmdd")
 
 
+def date_column_indices(source) -> list[int]:
+    """Zero-based indices of the date columns for a given file.
+
+    `source` may be:
+      * a type code   -> "LPER", "PROP", ...
+      * a sheet name   -> "Periodic", "Property", ...
+      * a header list  -> ["Transaction ID", ..., "Maturity Date", ...]
+      * a DataFrame    -> uses its column labels
+
+    Kept for backward compatibility with crefc_template.py.
+    """
+    if isinstance(source, pd.DataFrame):
+        headers = [str(c) for c in source.columns]
+    elif isinstance(source, (list, tuple)):
+        headers = [str(c) for c in source]
+    elif isinstance(source, str):
+        if source in FILE_TYPES:
+            headers = _headers_for(source)
+        else:
+            all_h = _load_all_headers(HEADER_WORKBOOK)
+            headers = all_h.get(source) or _headers_for(source)
+    else:
+        raise TypeError(f"date_column_indices: unsupported source {type(source).__name__}")
+    return [i for i, h in enumerate(headers) if _is_date_header(str(h))]
+
+
 def _normalize_date_series(s: pd.Series) -> pd.Series:
     def conv(v):
         t = _clean_str(v).replace(".0", "")
